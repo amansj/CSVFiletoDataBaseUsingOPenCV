@@ -1,4 +1,5 @@
 import java.io.FileInputStream;
+import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -8,6 +9,7 @@ import java.math.BigDecimal;
 import java.nio.charset.Charset;
 import java.nio.charset.CharsetDecoder;
 import java.nio.charset.CodingErrorAction;
+import java.sql.BatchUpdateException;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
@@ -28,7 +30,7 @@ public class WriterThread implements Runnable {
 	HashMap<Long, int[]> threadStatus;
 	int start,end;
 	final Logger logger = Logger.getLogger("Global Logger");
-	
+	private final int BATCH_SIZE=50;
 
 	private synchronized void errorinfo(Connection con,Exception e,int rownum)
 	{
@@ -66,26 +68,32 @@ public class WriterThread implements Runnable {
 	{  
 		Connection con=null;
 		CSVReader csvReader=null;
- 		try {
- 			FileInputStream input=new FileInputStream(fileName);
- 			CharsetDecoder decoder=Charset.forName("UTF-8").newDecoder();
- 			decoder.onMalformedInput(CodingErrorAction.IGNORE);
- 			Reader reader=new InputStreamReader(input,decoder);		 		    
- 			csvReader =new CSVReaderBuilder(reader).withSkipLines(start).build();  		 		     
- 			con=C3P0DataSource.getInstance().getConnection();
- 			PreparedStatement ps=null;
- 			for(long i=start;i<=end;i++)
- 			{  
- 				Object[] data=csvReader.readNext();
-			    try 
-			    {
-			    	ps=con.prepareStatement(sql);
-			    	//ps.setObject(parameterIndex, x);
-			    	for(Map.Entry<String, HashMap<String,String>> mapEntry:tableMappingDesc.entrySet())
-			    	{
-			    		
-			    		HashMap<String,String> csvHeader=mapEntry.getValue();
-			    		for(Map.Entry<String,String> entry:csvHeader.entrySet())
+		PreparedStatement ps=null;
+		FileInputStream input;
+		long i=0;
+		long current=start-1;
+		try {
+			input = new FileInputStream(fileName);
+			CharsetDecoder decoder=Charset.forName("UTF-8").newDecoder();
+			decoder.onMalformedInput(CodingErrorAction.IGNORE);
+			Reader reader=new InputStreamReader(input,decoder);		 		    
+			csvReader =new CSVReaderBuilder(reader).withSkipLines(start).build();  		 		     
+			con=C3P0DataSource.getInstance().getConnection();
+			con.setAutoCommit(false);
+			for(i=start;i<=end;i++)
+			{
+				Object[] data=csvReader.readNext();
+				if((i-start+1)%BATCH_SIZE==1)
+				{
+					ps=con.prepareStatement(sql);
+				}
+				
+				for(Map.Entry<String, HashMap<String,String>> mapEntry:tableMappingDesc.entrySet())
+		    	{
+		    		HashMap<String,String> csvHeader=mapEntry.getValue();
+		    		if(csvHeader.size()==1)
+		    		{
+		    			for(Map.Entry<String,String> entry:csvHeader.entrySet())
 			    		{
 			    			DbDataTypeEnum var=DbDataTypeEnum.valueOf(entry.getValue());
 			    			if(var.getter().equals(BigDecimal.class))
@@ -96,64 +104,83 @@ public class WriterThread implements Runnable {
 			    			{
 			    				ps.setObject(tableMetaData.get(mapEntry.getKey()), var.getter().cast(data[header.get(entry.getKey())]));
 			    			}
-			    			
 			    		}
-			    	}
-				    int r=ps.executeUpdate();
-				   
-				    if(r==1) {
-				    	int[] recordStatus=threadStatus.get(threadHashCode);
-						recordStatus[2]+=1;
-					    logger.info("/****************************************Processed  " +i+ "th Record********************************************************************************/");
-			    	}
-			    }
-			    catch (SQLException e) {
-					// TODO Auto-generated catch block
-			    	errorinfo(con,e,(int) i);
-			    	logger.error(e.toString());
-				}
-			    finally {
-			    	try {
-					   if(ps!=null)
-					   {
-						   ps.close();
-						   serialize();
-					   }
-					} 
-			    	catch (SQLException e) {
-						// TODO Auto-generated catch block
-			    		errorinfo(con,e,(int) i);
-			    		logger.error(e.toString());
+		    		}
+		    		
+		    	}
+				ps.addBatch();
+				if((i-start+1)%BATCH_SIZE==0)
+				{
+					int[] update=ps.executeBatch();
+					current+=update.length;
+					for(int k=0;k<update.length;k++)
+					{
+						logger.info("/****************************************Processed  " +(i-BATCH_SIZE+k+1)+ "th Record********************************************************************************/");	
 					}
-			    	
-   				} 
+					con.commit();
+					int[] recordStatus=threadStatus.get(threadHashCode);
+					recordStatus[2]=(int) current;
+					threadStatus.put(threadHashCode, recordStatus);
+					serialize();
+					ps.close();
+				}
+//    			int r=ps.executeUpdate();  
+//			    if(r==1) {
+//			    	int[] recordStatus=threadStatus.get(threadHashCode);
+//					recordStatus[2]+=1;
+//					threadStatus.put(threadHashCode, recordStatus);
+//				    logger.info("/****************************************Processed  " +i+ "th Record********************************************************************************/");
+//		    	}
+//			    ps.close();
+			    //serialize();
+    		}
+			int[] update=ps.executeBatch();
+			current+=update.length;
+			for(int k=0;k<update.length;k++)
+			{
+				logger.info("/****************************************Processed  " +(i-update.length+k+1)+ "th Record********************************************************************************/");
 			}
-	   	}catch (Exception e) {
+			con.commit();
+			int[] recordStatus=threadStatus.get(threadHashCode);
+			recordStatus[2]=(int) current;
+			threadStatus.put(threadHashCode, recordStatus);
+			serialize();
+		} catch (FileNotFoundException e) {
 			// TODO Auto-generated catch block
-			errorinfo(con,e,start);
-			logger.error(e.toString());
-   		}
- 		finally 
- 		{
- 			try {
- 				if(con!=null)
- 				{
- 					con.commit();
- 					con.close();
- 				}
- 				if(csvReader!=null)
- 				{
- 					csvReader.close();
- 				}
- 			} catch (SQLException e) {
- 				// TODO Auto-generated catch block
- 				errorinfo(con,e,start);
- 				logger.error(e.toString());
- 			} catch (IOException e) {
- 				// TODO Auto-generated catch block
- 				logger.error(e.toString());
- 			}
-	   }			
+			errorinfo(con,e,(int) i);
+    		logger.error(e.toString());
+		}
+		catch (BatchUpdateException buex) {
+			errorinfo(con,buex,(int) i-BATCH_SIZE+1);
+    		logger.error(buex.toString());
+			try {
+				con.rollback();
+			} catch (SQLException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			}
+		}
+		catch ( SQLException e) {
+			// TODO Auto-generated catch block
+			errorinfo(con,e,(int) i);
+    		logger.error(e.toString());
+		} catch (IOException e) {
+			// TODO Auto-generated catch block
+			errorinfo(con,e,(int) i);
+    		logger.error(e.toString());
+		}
+		finally {
+			try {
+				ps.close();
+				con.close();
+				csvReader.close();
+			} catch (SQLException | IOException e) {
+				// TODO Auto-generated catch block
+				errorinfo(con,e,(int) i);
+	    		logger.error(e.toString());
+			}
+		}
+			
 	}  
 	public void setIndex(int s,int e,HashMap<Long, int[]> threadStatus)
 	{
