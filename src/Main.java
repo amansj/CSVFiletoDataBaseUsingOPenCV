@@ -30,8 +30,10 @@ import com.opencsv.CSVReaderBuilder;
 
 public class Main {
 	private static  String SQL="";
-	private static final String TABLE_NAME="PG";
-	private static final String DESC_TABLE_NAME="DESCPG";
+	private static final String TABLE_NAME="members";
+	private static final String DESC_TABLE_NAME="DESCmembers";
+	private static final int NO_OF_CORES=2;
+	final static Logger logger = Logger.getLogger("Global Logger");
 	private static HashMap<String,Integer> tableMetaData()
 	{
 		HashMap<String,Integer> tableMeta=new HashMap<String,Integer>();
@@ -142,8 +144,7 @@ public class Main {
 	    }
 		return lines-1;
 	}
-	private static final int NO_OF_CORES=2;
-	final static Logger logger = Logger.getLogger("Global Logger");
+	
 	@SuppressWarnings("unchecked")
 	private static HashMap<Long, int[]> deSerialize() {
 		HashMap<Long, int[]> prevThreadStatus=null;
@@ -174,12 +175,7 @@ public class Main {
 	public static void main(String[] args) {
 		// TODO Auto-generated method stub
 		HashMap<Long, int[]> prevThreadStatus=deSerialize();
-		String fileName="doc/pg5.csv";
-		Scanner sc=new Scanner(System.in);
-		MutableInt numRecords = new MutableInt();
-		MutableInt numPage=new MutableInt();
-		MutableInt remRecords=new MutableInt();
-		int remainingRecord;
+		String fileName="doc/members2.csv";
 		HashMap<String,Integer> tableMetaData=tableMetaData();
 		HashMap<String,Integer> header=csvHeader(fileName);
 		HashMap<String,HashMap<String,String>> tableMappingDesc=tableDescription();
@@ -205,12 +201,17 @@ public class Main {
 		else
 		{
 			System.out.print("Enter Number of Thread:");
+			Scanner sc=new Scanner(System.in);
 			int numOfThread=sc.nextInt();
+			sc.close();
 			File file=new File(fileName);
+			MutableInt numRecords = new MutableInt();
+			MutableInt numPage=new MutableInt();
+			MutableInt remRecords=new MutableInt();
 			pageCalculations(numRecords,numPage,remRecords,numOfThread,file);
 			int numOfRecord=numRecords.intValue();
 			int numPages=numPage.intValue();
-			remainingRecord=remRecords.intValue();
+			int remainingRecord=remRecords.intValue();
 			int i;
 			for(i=0;i<numOfThread;i++)
 			{
@@ -255,7 +256,6 @@ public class Main {
 				logger.error(e.toString());
 			}
 		}
-		sc.close();
 		Instant endtime = Instant.now();
 		logger.info(Duration.between(starttime, endtime));
 		System.out.println(Duration.between(starttime, endtime));
