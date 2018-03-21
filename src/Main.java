@@ -68,8 +68,13 @@ public class Main {
 			ResultSet rs=pStatement.executeQuery();
 			HashMap<String,String> dbDesc=null;
 			while(rs.next())
-			{	dbDesc=tableMappingDesc.get(rs.getString(1));
-				if(dbDesc==null)
+			{	
+				if(tableMappingDesc.containsKey(rs.getString(2)))
+				{
+					dbDesc=tableMappingDesc.get(rs.getString(2));
+					
+				}
+				else
 				{
 					dbDesc=new HashMap<String,String>();
 				}
@@ -249,7 +254,6 @@ public class Main {
 				// TODO Auto-generated catch block
 				logger.error(e.toString());
 			}
-			
 		}
 		sc.close();
 		Instant endtime = Instant.now();
