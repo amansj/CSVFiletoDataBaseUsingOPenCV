@@ -1,3 +1,4 @@
+import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
@@ -6,6 +7,7 @@ import java.io.InputStreamReader;
 import java.io.ObjectOutputStream;
 import java.io.Reader;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.nio.charset.Charset;
 import java.nio.charset.CharsetDecoder;
 import java.nio.charset.CodingErrorAction;
@@ -15,6 +17,7 @@ import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 import org.apache.log4j.Logger;
 
@@ -22,6 +25,7 @@ import com.opencsv.CSVReader;
 import com.opencsv.CSVReaderBuilder;
 public class WriterThread implements Runnable {
 	String fileName;
+	private final String DECIMAL_REGEX="[-+]?[0-9]*\\.?[0-9]+";
 	long threadHashCode;
 	String sql;
 	HashMap<String,Integer> header;
@@ -31,21 +35,20 @@ public class WriterThread implements Runnable {
 	int start,end;
 	final Logger logger = Logger.getLogger("Global Logger");
 	private final int BATCH_SIZE=50;
-
-	private synchronized void errorinfo(Connection con,Exception e,int rownum)
+	private synchronized void errorinfo(Connection con,String error,int rownum)
 	{
 		PreparedStatement ps=null;
 		try {
 			ps=con.prepareStatement("insert into errortable values(?,?)");
 			ps.setInt(1, rownum);
-			ps.setString(2, e.getMessage());
+			ps.setString(2, error);
 			if(ps.executeUpdate()==1)
 			{
 				logger.info("Error Msg Inserted");
 			}
 		} catch (SQLException e1) {
 			// TODO Auto-generated catch block
-			logger.error(e.toString());
+			logger.error(e1.toString());
 		}
 		
 	}
@@ -82,7 +85,7 @@ public class WriterThread implements Runnable {
 			con.setAutoCommit(false);
 			for(i=start;i<=end;i++)
 			{
-				Object[] data=csvReader.readNext();
+				String[] data=csvReader.readNext();
 				if((i-start+1)%BATCH_SIZE==1)
 				{
 					ps=con.prepareStatement(sql);
@@ -95,18 +98,53 @@ public class WriterThread implements Runnable {
 		    		{
 		    			for(Map.Entry<String,String> entry:csvHeader.entrySet())
 			    		{
-			    			DbDataTypeEnum var=DbDataTypeEnum.valueOf(entry.getValue());
-			    			if(var.getter().equals(BigDecimal.class))
+		    				String dataType=entry.getValue();
+		    				System.out.println(dataType);
+		    				String[] precision=null;
+		    				if(entry.getValue().contains("Decimal"))
+		    				{		
+		    					System.out.println(dataType.substring(dataType.indexOf("(")+1, dataType.length()-1));
+		    					precision=dataType.substring(dataType.indexOf("(")+1, dataType.length()-1).split(",");
+    							dataType="Decimal";
+		    				}
+		    				
+			    			DbDataTypeEnum var=DbDataTypeEnum.valueOf(dataType);
+			    			switch(var)
 			    			{
-			    				ps.setBigDecimal(tableMetaData.get(mapEntry.getKey()), new BigDecimal((String)data[header.get(entry.getKey())]));
-			    			}
-			    			else
-			    			{
-			    				ps.setObject(tableMetaData.get(mapEntry.getKey()), var.getter().cast(data[header.get(entry.getKey())]));
+			    			case Decimal:
+			    				if(Pattern.matches(DECIMAL_REGEX, data[header.get(entry.getKey())]))
+			    				{
+			    					ps.setBigDecimal(tableMetaData.get(mapEntry.getKey()), new BigDecimal(data[header.get(entry.getKey())]).setScale(Integer.parseInt(precision[1]),RoundingMode.HALF_EVEN));
+			    				}
+			    				else
+			    				{
+			    					errorinfo(con,"Cannot parse String to Decimal",(int) i);
+			    				}
+			    				break;
+			    			case String:
+			    				ps.setString(tableMetaData.get(mapEntry.getKey()), data[header.get(entry.getKey())]);
+			    				break;
+			    			case File:
+			    				File dataFile=new File(data[header.get(entry.getKey())]);
+			    				if(dataFile.exists())
+			    				{
+			    					FileInputStream fis=new FileInputStream(dataFile);
+				    				ps.setBinaryStream(tableMetaData.get(mapEntry.getKey()), fis,dataFile.length());
+			    				}
+			    				else
+			    				{
+			    					errorinfo(con,"Invalid File Path",(int) i);
+			    				}
+			    				break;
+			    			case Boolean:
+			    			
+			    				ps.setInt(tableMetaData.get(mapEntry.getKey()),(Boolean.parseBoolean(data[header.get(entry.getKey())])?1:0 ));
+			    				break;
+			    			default:
+			    				errorinfo(con,"Invalid DataType",(int) i);
 			    			}
 			    		}
 		    		}
-		    		
 		    	}
 				ps.addBatch();
 				if((i-start+1)%BATCH_SIZE==0)
@@ -124,15 +162,6 @@ public class WriterThread implements Runnable {
 					serialize();
 					ps.close();
 				}
-//    			int r=ps.executeUpdate();  
-//			    if(r==1) {
-//			    	int[] recordStatus=threadStatus.get(threadHashCode);
-//					recordStatus[2]+=1;
-//					threadStatus.put(threadHashCode, recordStatus);
-//				    logger.info("/****************************************Processed  " +i+ "th Record********************************************************************************/");
-//		    	}
-//			    ps.close();
-			    //serialize();
     		}
 			int[] update=ps.executeBatch();
 			current+=update.length;
@@ -147,11 +176,11 @@ public class WriterThread implements Runnable {
 			serialize();
 		} catch (FileNotFoundException e) {
 			// TODO Auto-generated catch block
-			errorinfo(con,e,(int) i);
+			errorinfo(con,e.getMessage(),(int) i);
     		logger.error(e.toString());
 		}
 		catch (BatchUpdateException buex) {
-			errorinfo(con,buex,(int) i-BATCH_SIZE+1);
+			errorinfo(con,buex.getMessage(),(int) i-BATCH_SIZE+1);
     		logger.error(buex.toString());
 			try {
 				con.rollback();
@@ -162,11 +191,11 @@ public class WriterThread implements Runnable {
 		}
 		catch ( SQLException e) {
 			// TODO Auto-generated catch block
-			errorinfo(con,e,(int) i);
+			errorinfo(con,e.getMessage(),(int) i);
     		logger.error(e.toString());
 		} catch (IOException e) {
 			// TODO Auto-generated catch block
-			errorinfo(con,e,(int) i);
+			errorinfo(con,e.getMessage(),(int) i);
     		logger.error(e.toString());
 		}
 		finally {
@@ -176,7 +205,7 @@ public class WriterThread implements Runnable {
 				csvReader.close();
 			} catch (SQLException | IOException e) {
 				// TODO Auto-generated catch block
-				errorinfo(con,e,(int) i);
+				errorinfo(con,e.getMessage(),(int) i);
 	    		logger.error(e.toString());
 			}
 		}
