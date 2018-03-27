@@ -30,8 +30,8 @@ import com.opencsv.CSVReaderBuilder;
 
 public class Main {
 	private static  String SQL="";
-	private static final String TABLE_NAME="PG";
-	private static final String DESC_TABLE_NAME="DESCPG";
+	private static final String TABLE_NAME="DATA";
+	private static final String DESC_TABLE_NAME="DESCDATA";
 	private static final int NO_OF_CORES=2;
 	final static Logger logger = Logger.getLogger("Global Logger");
 	private static HashMap<String,Integer> tableMetaData()
@@ -175,7 +175,7 @@ public class Main {
 	public static void main(String[] args) {
 		// TODO Auto-generated method stub
 		HashMap<Long, int[]> prevThreadStatus=deSerialize();
-		String fileName="doc/pg5.csv";
+		String fileName="doc/data.csv";
 		HashMap<String,Integer> tableMetaData=tableMetaData();
 		HashMap<String,Integer> header=csvHeader(fileName);
 		HashMap<String,HashMap<String,String>> tableMappingDesc=tableDescription();

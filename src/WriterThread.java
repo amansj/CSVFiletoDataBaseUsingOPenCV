@@ -1,3 +1,5 @@
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
@@ -12,12 +14,16 @@ import java.nio.charset.Charset;
 import java.nio.charset.CharsetDecoder;
 import java.nio.charset.CodingErrorAction;
 import java.sql.BatchUpdateException;
+import java.sql.Blob;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.sql.Savepoint;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.regex.Pattern;
+
+import javax.imageio.ImageIO;
 
 import org.apache.log4j.Logger;
 
@@ -35,6 +41,198 @@ public class WriterThread implements Runnable {
 	int start,end;
 	final Logger logger = Logger.getLogger("Global Logger");
 	private final int BATCH_SIZE=50;
+	private synchronized String formulaSubstitution(String formula,int index)
+	{
+		String result="";
+		int currentIndexOpen=formula.indexOf("(",index+1);
+		int currentIndexClose=formula.indexOf(")", index+1);
+		if(currentIndexOpen>currentIndexClose||currentIndexOpen==-1)
+		{
+			result=formula.substring(index+1, currentIndexClose);
+		}
+		else
+		{
+			result=formulaSubstitution(formula,currentIndexOpen);
+		}
+		return result;
+	}
+	private synchronized String formulaeEvaluation(String[] data,String formula,String dataType,String scale)
+	{
+		String result="";
+		int count_=0;
+		int count__=0;
+		for(int i=0;i<formula.length();i++)
+		{
+		    if(formula.indexOf("(", i)!=-1)
+		    {
+		    	count_++;
+		    }
+		    else
+		    {
+		    	break;
+		    }
+		}
+		for(int i=0;i<formula.length();i++)
+		{
+		    if(formula.indexOf("(", i)!=-1)
+		    {
+		    	count__++;
+		    }
+		    else
+		    {
+		    	break;
+		    }
+		}
+		if(count_!=count__)
+			return "Invalid Formula";
+		if(dataType.equals("Decimal"))
+		{
+			while(formula.contains("("))
+			{
+				int start=formula.indexOf("(");
+				String formulatoEvaluate=formulaSubstitution(formula,start);
+				result=formulaEvaluation(data,formulatoEvaluate,scale);
+				
+				formula=formula.replace("("+formulatoEvaluate+")",":"+result);
+			}
+			formula=formulaEvaluation(data,formula,scale);
+			result=formula;
+			
+		}
+		if(dataType.equals("String"))
+		{
+			String operand1="";
+			String operand2="";
+			String data1="";
+			String data2="";
+			String operator="+";
+			formula=formula.replace("\" \"", " ");
+			formula=formula.replace("\"", "");
+			while(formula.contains(operator))
+			{
+				int op=formula.indexOf(operator);
+				operand1=prevcolname(formula,op);
+				operand2=nextcolname(formula,op);
+				if(!header.containsKey(operand1))
+				{
+					data1=operand1;
+				}
+				else
+				{
+					data1=data[header.get(operand1)];
+				}
+				if(!header.containsKey(operand2))
+				{
+					data2=operand2;
+				}
+				else
+				{
+					data2=data[header.get(operand2)];
+				}
+				result=data1+data2;
+				formula=formula.replace(":"+operand1+operator+":"+operand2, ":"+result);
+			}
+			formula=formula.substring(1, formula.length());
+			if(header.containsKey(formula))
+			{
+				formula=data[header.get(formula)];
+			}
+			result=formula;
+		}
+		
+		return result;
+	}
+	private synchronized String Operation(String operand1,String operand2,String operator,String scale)
+	{
+		BigDecimal op1=new BigDecimal(operand1);
+		BigDecimal op2=new BigDecimal(operand2);
+		String result=null;
+		switch(operator)
+		{
+		case "+":
+			result=op1.add(op2).setScale(Integer.parseInt(scale), RoundingMode.HALF_EVEN).toString();
+			break;
+		case "-":
+			result=op1.subtract(op2).setScale(Integer.parseInt(scale), RoundingMode.HALF_EVEN).toString();
+			break;
+		case "*":
+			result=op1.multiply(op2).setScale(Integer.parseInt(scale), RoundingMode.HALF_EVEN).toString();
+			break;
+		case "/":
+			result=op1.divide(op2,Integer.parseInt(scale), RoundingMode.HALF_EVEN).toString();
+			break;
+		}
+		return result;
+	}
+	private synchronized String OperationResult(String[] data,String formula,String operator,String scale)
+	{
+		String operand1="";
+		String operand2="";
+		String data1="";
+		String data2="";
+		String result="";
+		while(formula.contains(operator))
+		{
+			int op=formula.indexOf(operator);
+			operand1=prevcolname(formula,op);
+			operand2=nextcolname(formula,op);
+			if(Pattern.matches(DECIMAL_REGEX,operand1))
+			{
+				data1=operand1;
+			}
+			else
+			{
+				data1=data[header.get(operand1)];
+			}
+			if(Pattern.matches(DECIMAL_REGEX,operand2))
+			{
+				data2=operand2;
+			}
+			else
+			{
+				data2=data[header.get(operand2)];
+			}
+			result=Operation(data1, data2, operator,scale);
+			formula=formula.replace(":"+operand1+operator+":"+operand2, ":"+result);
+		}
+		return formula;
+	}
+	private synchronized String formulaEvaluation(String[] data,String formula,String scale)
+	{
+		String operator="/";
+		formula=OperationResult(data, formula, operator,scale);
+		operator="*";
+		formula=OperationResult(data, formula, operator,scale);
+		operator="+";
+		formula=OperationResult(data, formula, operator,scale);
+		operator="-";
+		formula=OperationResult(data, formula, operator,scale);
+		formula=formula.substring(1, formula.length());
+		if(!Pattern.matches(DECIMAL_REGEX, formula))
+		{
+			formula=data[header.get(formula)];
+		}
+		return formula;
+	}
+	private synchronized String prevcolname(String exp,int op)
+	  {
+		  String[] data=exp.substring(0, op).split(":");
+		  return data[data.length-1];
+	  }
+	private synchronized String nextcolname(String exp,int op)
+	  {
+		  int r=exp.indexOf(":", op+1);
+		  String sub="";
+		  if(r==-1)
+		  {
+			  sub=exp.substring(op+1, r-2);
+		  }
+		  else
+		  {
+			  sub=exp.substring(op+2);
+		  }
+		  return sub;
+	  }
 	private synchronized void errorinfo(Connection con,String error,int rownum)
 	{
 		PreparedStatement ps=null;
@@ -56,7 +254,6 @@ public class WriterThread implements Runnable {
 	{
 		FileOutputStream fileOut;
 		try {
-		
 			fileOut = new FileOutputStream("ser_files/write_record.ser");
 			 ObjectOutputStream out = new ObjectOutputStream(fileOut);
 			 out.writeObject(threadStatus);
@@ -75,6 +272,7 @@ public class WriterThread implements Runnable {
 		FileInputStream input;
 		long i=0;
 		long current=start-1;
+		Savepoint savingstate=null;
 		try {
 			input = new FileInputStream(fileName);
 			CharsetDecoder decoder=Charset.forName("UTF-8").newDecoder();
@@ -83,8 +281,12 @@ public class WriterThread implements Runnable {
 			csvReader =new CSVReaderBuilder(reader).withSkipLines(start).build();  		 		     
 			con=C3P0DataSource.getInstance().getConnection();
 			con.setAutoCommit(false);
+			con.rollback();
+			savingstate=con.setSavepoint("correntsafestate");
+			boolean status;
 			for(i=start;i<=end;i++)
 			{
+				status=true;
 				String[] data=csvReader.readNext();
 				if((i-start+1)%BATCH_SIZE==1)
 				{
@@ -99,63 +301,117 @@ public class WriterThread implements Runnable {
 		    			for(Map.Entry<String,String> entry:csvHeader.entrySet())
 			    		{
 		    				String dataType=entry.getValue();
-		    				System.out.println(dataType);
 		    				String[] precision=null;
 		    				if(entry.getValue().contains("Decimal"))
 		    				{		
-		    					System.out.println(dataType.substring(dataType.indexOf("(")+1, dataType.length()-1));
 		    					precision=dataType.substring(dataType.indexOf("(")+1, dataType.length()-1).split(",");
     							dataType="Decimal";
 		    				}
-		    				
+		    				String result="";
 			    			DbDataTypeEnum var=DbDataTypeEnum.valueOf(dataType);
 			    			switch(var)
 			    			{
-			    			case Decimal:
-			    				if(Pattern.matches(DECIMAL_REGEX, data[header.get(entry.getKey())]))
-			    				{
-			    					ps.setBigDecimal(tableMetaData.get(mapEntry.getKey()), new BigDecimal(data[header.get(entry.getKey())]).setScale(Integer.parseInt(precision[1]),RoundingMode.HALF_EVEN));
-			    				}
-			    				else
-			    				{
-			    					errorinfo(con,"Cannot parse String to Decimal",(int) i);
-			    				}
-			    				break;
-			    			case String:
-			    				ps.setString(tableMetaData.get(mapEntry.getKey()), data[header.get(entry.getKey())]);
-			    				break;
-			    			case File:
-			    				File dataFile=new File(data[header.get(entry.getKey())]);
-			    				if(dataFile.exists())
-			    				{
-			    					FileInputStream fis=new FileInputStream(dataFile);
-				    				ps.setBinaryStream(tableMetaData.get(mapEntry.getKey()), fis,dataFile.length());
-			    				}
-			    				else
-			    				{
-			    					errorinfo(con,"Invalid File Path",(int) i);
-			    				}
-			    				break;
-			    			case Boolean:
-			    			
-			    				ps.setInt(tableMetaData.get(mapEntry.getKey()),(Boolean.parseBoolean(data[header.get(entry.getKey())])?1:0 ));
-			    				break;
-			    			default:
-			    				errorinfo(con,"Invalid DataType",(int) i);
-			    			}
+			    				case Decimal:
+			    					result=formulaeEvaluation(data, entry.getKey(),dataType,precision[1]);
+			    					if(Pattern.matches(DECIMAL_REGEX, result))
+			    					{
+			    						ps.setBigDecimal(tableMetaData.get(mapEntry.getKey()), new BigDecimal(result));
+			    					}
+			    					else
+			    					{
+			    						status=false;
+			    						errorinfo(con,"Cannot parse String to Decimal",(int) i);
+			    					}
+			    					break;
+			    				case String:
+			    					result=formulaeEvaluation(data, entry.getKey(),dataType,"0");
+			    					ps.setString(tableMetaData.get(mapEntry.getKey()), result);
+			    					break;
+			    				case File:
+			    					String formula=entry.getKey();
+			    					Blob fileData=null;
+			    					if(formula.startsWith("FromPath"))
+			    					{
+			    						formula=formula.replace("FromPath(", "");
+			    						formula=formula.replace(")", "");
+			    						result=formulaEvaluation(data, formula,"0");
+			    						File dataFile=new File(result);
+			    						if(dataFile.exists())
+			    						{
+			    							byte[] imageInByte;
+			    							String extension=result.substring(result.lastIndexOf("."));
+			    							BufferedImage originalImage = ImageIO.read(dataFile);
+			    							ByteArrayOutputStream baos = new ByteArrayOutputStream();
+			    							ImageIO.write(originalImage, extension, baos);
+			    							baos.flush();
+			    							imageInByte = baos.toByteArray();
+			    							baos.close();
+			    							fileData=con.createBlob();
+			    							fileData.setBytes(1, imageInByte);
+			    						}
+			    					}
+			    					if(formula.startsWith("FromString"))
+			    					{
+			    						formula=formula.replace("FromString(", "");
+			    						formula=formula.replace(")", "");
+			    						result=formulaEvaluation(data, formula,"0");
+			    						fileData=con.createBlob();
+			    						fileData.setBytes(1, result.getBytes());
+			    					}
+			    					else
+			    					{
+			    						status=false;
+			    						errorinfo(con,"Invalid Formula",(int) i);
+			    					}
+			    					if(fileData!=null)
+			    					{
+			    						ps.setBlob(tableMetaData.get(mapEntry.getKey()), fileData);
+			    					}
+			    					else
+			    					{
+			    						status=false;
+			    						errorinfo(con,"Invalid FilePath",(int) i);
+			    					}
+			    					break;
+			    				case Boolean:
+			    					formula=entry.getKey();
+			    					if(formula.startsWith("Char"))
+			    					{
+			    						formula=formula.replace("Char(", "");
+			    						formula=formula.replace(")", "");
+			    						result=formulaEvaluation(data, formula,"0");
+			    						ps.setString(tableMetaData.get(mapEntry.getKey()),(Boolean.parseBoolean(result)?"Y":"N" ));
+			    					}
+			    					if(formula.startsWith("Int"))
+			    					{
+			    						formula=formula.replace("Int(", "");
+			    						formula=formula.replace(")", "");
+			    						result=formulaEvaluation(data, formula,"0");
+			    						ps.setInt(tableMetaData.get(mapEntry.getKey()),(Boolean.parseBoolean(result)?1:0 ));
+			    					}
+			    					break;
+			    				default:
+			    					errorinfo(con,"Invalid DataType",(int) i);
+		    				}
 			    		}
 		    		}
 		    	}
-				ps.addBatch();
+				if(status)
+				{
+					ps.addBatch();
+				}
 				if((i-start+1)%BATCH_SIZE==0)
 				{
 					int[] update=ps.executeBatch();
-					current+=update.length;
+					
 					for(int k=0;k<update.length;k++)
 					{
 						logger.info("/****************************************Processed  " +(i-BATCH_SIZE+k+1)+ "th Record********************************************************************************/");	
 					}
 					con.commit();
+					con.releaseSavepoint(savingstate);
+					savingstate=con.setSavepoint("savepoint");
+					current+=update.length;
 					int[] recordStatus=threadStatus.get(threadHashCode);
 					recordStatus[2]=(int) current;
 					threadStatus.put(threadHashCode, recordStatus);
@@ -164,12 +420,14 @@ public class WriterThread implements Runnable {
 				}
     		}
 			int[] update=ps.executeBatch();
-			current+=update.length;
 			for(int k=0;k<update.length;k++)
 			{
 				logger.info("/****************************************Processed  " +(i-update.length+k+1)+ "th Record********************************************************************************/");
 			}
 			con.commit();
+			con.releaseSavepoint(savingstate);
+			savingstate=con.setSavepoint("savepoint");
+			current+=update.length;
 			int[] recordStatus=threadStatus.get(threadHashCode);
 			recordStatus[2]=(int) current;
 			threadStatus.put(threadHashCode, recordStatus);
@@ -183,7 +441,7 @@ public class WriterThread implements Runnable {
 			errorinfo(con,buex.getMessage(),(int) i-BATCH_SIZE+1);
     		logger.error(buex.toString());
 			try {
-				con.rollback();
+				con.rollback(savingstate);
 			} catch (SQLException e) {
 				// TODO Auto-generated catch block
 				e.printStackTrace();
